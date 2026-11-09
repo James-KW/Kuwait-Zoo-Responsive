@@ -85,13 +85,12 @@ async function addSpecies(db) {
     const male = safeCount($('newSpeciesMale').value);
     const female = safeCount($('newSpeciesFemale').value);
     const unknown = safeCount($('newSpeciesUnknown').value);
-    await setDoc(ref, { label, emoji: '🐒', male, female, unknown, total: male + female + unknown, updatedAt: serverTimestamp() });
-    deletedIds.delete(id);
-    liveSpeciesIds.add(id);
-    firestoreIsSourceOfTruth = true;
+    const remainingDeleted = [...deletedIds].filter(deletedId => deletedId !== id);
     await setDoc(doc(db, 'species', REPORT_DOC_ID), {
-      deletedSpecies: [...deletedIds], initialized: true, updatedAt: serverTimestamp()
+      deletedSpecies: remainingDeleted, initialized: true, updatedAt: serverTimestamp()
     }, { merge: true });
+    await setDoc(ref, { label, emoji: '🐒', male, female, unknown, total: male + female + unknown, updatedAt: serverTimestamp() });
+    deletedIds.delete(id); liveSpeciesIds.add(id); firestoreIsSourceOfTruth = true;
     $('newSpeciesName').value = '';
     $('newSpeciesMale').value = $('newSpeciesFemale').value = $('newSpeciesUnknown').value = '0';
     setStatus(`${label} added and saved to Firestore.`);
@@ -110,14 +109,62 @@ async function deleteSpecies(db, id, label) {
       deletedSpecies: [...nextDeleted], initialized: true, updatedAt: serverTimestamp()
     }, { merge: true });
     await deleteDoc(doc(db, 'species', id));
-    deletedIds.add(id);
-    liveSpeciesIds.delete(id);
-    firestoreIsSourceOfTruth = true;
+    deletedIds.add(id); liveSpeciesIds.delete(id); firestoreIsSourceOfTruth = true;
     reconcileRows();
     setStatus(`${label} deleted and saved. It will remain deleted after reload.`);
   } catch (error) {
     console.error('Delete species failed:', error);
     setStatus(`Delete failed (${error.code || error.message}). Check Firestore rules for writes to __report__ and deletes from species.`, true);
+  }
+}
+function collectEditedRows() {
+  const rows = [...document.querySelectorAll('#speciesRows tr')];
+  return rows.map(row => {
+    const id = row.dataset.id;
+    if (!id || id === REPORT_DOC_ID) throw new Error('Invalid species row ID.');
+    const label = row.querySelector('.species-name strong')?.textContent.trim();
+    if (!label) throw new Error(`Species ${id} needs a name.`);
+    const item = { id, label, emoji: row.querySelector('.emoji')?.textContent || '🐒' };
+    for (const field of ['male', 'female', 'unknown']) {
+      const raw = row.querySelector(`[data-field="${field}"]`)?.textContent.trim();
+      if (raw === '' || !/^\d+$/.test(raw)) throw new Error(`${label}: ${field} must be a whole number 0 or greater.`);
+      item[field] = Number(raw);
+      if (!Number.isSafeInteger(item[field])) throw new Error(`${label}: ${field} is too large.`);
+    }
+    item.total = item.male + item.female + item.unknown;
+    return item;
+  });
+}
+async function saveAll(db) {
+  if (!activeUser || !document.body.classList.contains('editing')) {
+    setStatus('Sign in as admin and enable Edit Mode before saving.', true); return;
+  }
+  const buttons = [$('saveBtn'), $('statusSave')].filter(Boolean);
+  buttons.forEach(button => button.disabled = true);
+  setStatus('Saving all visible species and report text to Firestore…');
+  try {
+    const items = collectEditedRows();
+    const batchTime = serverTimestamp();
+    for (const item of items) {
+      await setDoc(doc(db, 'species', item.id), {
+        label: item.label, emoji: item.emoji, male: item.male, female: item.female,
+        unknown: item.unknown, total: item.total, updatedAt: batchTime
+      }, { merge: true });
+    }
+    const note = $('populationNote')?.textContent.trim() || '';
+    const summary = $('summaryText')?.textContent.trim() || '';
+    await setDoc(doc(db, 'species', REPORT_DOC_ID), {
+      populationNote: note, populationSummary: summary,
+      deletedSpecies: [...deletedIds], initialized: true, updatedAt: serverTimestamp()
+    }, { merge: true });
+    firestoreIsSourceOfTruth = true;
+    setStatus('Saved successfully. Reloading the live Firestore report…');
+    // Reload releases the page's stale in-memory data array; next render comes from Firestore.
+    setTimeout(() => location.reload(), 700);
+  } catch (error) {
+    console.error('Save report failed:', error);
+    setStatus(`Save failed (${error.code || error.message}). Check Firestore rules and the highlighted field values.`, true);
+    buttons.forEach(button => button.disabled = false);
   }
 }
 function initialize() {
@@ -131,8 +178,6 @@ function initialize() {
   buildAddSpeciesControl();
   onAuthStateChanged(auth, user => { activeUser = user; });
 
-  // Track the complete live collection, not only app-side delete markers. This also
-  // catches documents removed/created directly in Firebase Console via onSnapshot.
   onSnapshot(collection(db, 'species'), snapshot => {
     const reportDoc = snapshot.docs.find(item => item.id === REPORT_DOC_ID);
     const metadata = reportDoc?.data();
@@ -154,12 +199,17 @@ function initialize() {
     if (!button) return;
     event.preventDefault(); event.stopImmediatePropagation();
     const row = button.closest('tr');
-    if (row) deleteSpecies(db, row.dataset.id, row.querySelector('td')?.textContent.trim() || row.dataset.id);
+    if (row) deleteSpecies(db, row.dataset.id, row.querySelector('.species-name strong')?.textContent.trim() || row.dataset.id);
   }, true);
+  for (const id of ['saveBtn', 'statusSave']) {
+    $(id)?.addEventListener('click', event => {
+      event.preventDefault(); event.stopImmediatePropagation();
+      saveAll(db);
+    }, true);
+  }
   $('addSpeciesButton').addEventListener('click', () => addSpecies(db));
 }
 
-// firebase-config.js imports this module before the page initializes its Firebase app.
 function startWhenReady() {
   initialize();
   if (!initialized) setTimeout(startWhenReady, 100);
