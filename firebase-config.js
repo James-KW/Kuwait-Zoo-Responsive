@@ -8,4 +8,7 @@ const firebaseConfig = {
   measurementId: "G-JVKZM8038T"
 };
 
+// Admin species add/delete support. This module safely no-ops on pages without the report table.
+import './admin-species.js';
+
 export { firebaseConfig };
