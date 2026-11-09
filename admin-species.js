@@ -6,6 +6,8 @@ import {
 
 const REPORT_DOC_ID = '__report__';
 const deletedIds = new Set();
+const liveSpeciesIds = new Set();
+let firestoreIsSourceOfTruth = false;
 let activeUser = null;
 let initialized = false;
 
@@ -36,11 +38,12 @@ function reportTotals() {
   assign('maleTotal', male); assign('femaleTotal', female);
   assign('unknownTotal', unknown); assign('chimpTotal', chimpanzees);
 }
-function filterDeletedRows() {
+function reconcileRows() {
   const tbody = $('speciesRows');
   if (!tbody) return;
   for (const row of [...tbody.querySelectorAll('tr')]) {
-    if (deletedIds.has(row.dataset.id)) row.remove();
+    const id = row.dataset.id;
+    if (deletedIds.has(id) || (firestoreIsSourceOfTruth && !liveSpeciesIds.has(id))) row.remove();
   }
   reportTotals();
 }
@@ -84,7 +87,11 @@ async function addSpecies(db) {
     const unknown = safeCount($('newSpeciesUnknown').value);
     await setDoc(ref, { label, emoji: '🐒', male, female, unknown, total: male + female + unknown, updatedAt: serverTimestamp() });
     deletedIds.delete(id);
-    await setDoc(doc(db, 'species', REPORT_DOC_ID), { deletedSpecies: [...deletedIds], updatedAt: serverTimestamp() }, { merge: true });
+    liveSpeciesIds.add(id);
+    firestoreIsSourceOfTruth = true;
+    await setDoc(doc(db, 'species', REPORT_DOC_ID), {
+      deletedSpecies: [...deletedIds], initialized: true, updatedAt: serverTimestamp()
+    }, { merge: true });
     $('newSpeciesName').value = '';
     $('newSpeciesMale').value = $('newSpeciesFemale').value = $('newSpeciesUnknown').value = '0';
     setStatus(`${label} added and saved to Firestore.`);
@@ -99,15 +106,18 @@ async function deleteSpecies(db, id, label) {
   try {
     const nextDeleted = new Set(deletedIds);
     nextDeleted.add(id);
-    // Save the deletion marker before deleting the row document. Defaults are hidden using this marker after reload.
-    await setDoc(doc(db, 'species', REPORT_DOC_ID), { deletedSpecies: [...nextDeleted], updatedAt: serverTimestamp() }, { merge: true });
+    await setDoc(doc(db, 'species', REPORT_DOC_ID), {
+      deletedSpecies: [...nextDeleted], initialized: true, updatedAt: serverTimestamp()
+    }, { merge: true });
     await deleteDoc(doc(db, 'species', id));
     deletedIds.add(id);
-    filterDeletedRows();
+    liveSpeciesIds.delete(id);
+    firestoreIsSourceOfTruth = true;
+    reconcileRows();
     setStatus(`${label} deleted and saved. It will remain deleted after reload.`);
   } catch (error) {
     console.error('Delete species failed:', error);
-    setStatus(`Delete failed (${error.code || error.message}). Firestore must allow admin writes to __report__ and deletes from species.`, true);
+    setStatus(`Delete failed (${error.code || error.message}). Check Firestore rules for writes to __report__ and deletes from species.`, true);
   }
 }
 function initialize() {
@@ -120,17 +130,25 @@ function initialize() {
   const auth = getAuth(app), db = getFirestore(app);
   buildAddSpeciesControl();
   onAuthStateChanged(auth, user => { activeUser = user; });
-  onSnapshot(doc(db, 'species', REPORT_DOC_ID), snapshot => {
+
+  // Track the complete live collection, not only app-side delete markers. This also
+  // catches documents removed/created directly in Firebase Console via onSnapshot.
+  onSnapshot(collection(db, 'species'), snapshot => {
+    const reportDoc = snapshot.docs.find(item => item.id === REPORT_DOC_ID);
+    const metadata = reportDoc?.data();
     deletedIds.clear();
-    for (const id of snapshot.data()?.deletedSpecies || []) deletedIds.add(id);
-    filterDeletedRows();
+    for (const id of metadata?.deletedSpecies || []) deletedIds.add(id);
+    liveSpeciesIds.clear();
+    for (const item of snapshot.docs) if (item.id !== REPORT_DOC_ID) liveSpeciesIds.add(item.id);
+    firestoreIsSourceOfTruth = Boolean(reportDoc || liveSpeciesIds.size || metadata?.initialized);
+    reconcileRows();
   }, error => {
-    console.error('Could not read persistent deletion markers:', error);
-    setStatus(`Could not load delete state (${error.code || error.message}); check Firestore read rules.`, true);
+    console.error('Could not watch Firestore species:', error);
+    setStatus(`Live Firestore update failed (${error.code || error.message}). Check Firestore read rules.`, true);
   });
-  const observer = new MutationObserver(filterDeletedRows);
+
+  const observer = new MutationObserver(reconcileRows);
   observer.observe(tbody, { childList: true });
-  // Capture before the page's row handlers so the delete action uses the persisted tombstone flow.
   tbody.addEventListener('click', event => {
     const button = event.target.closest('.delete-species');
     if (!button) return;
@@ -142,7 +160,6 @@ function initialize() {
 }
 
 // firebase-config.js imports this module before the page initializes its Firebase app.
-// Retry briefly instead of silently abandoning all add/delete handlers on getApp() failure.
 function startWhenReady() {
   initialize();
   if (!initialized) setTimeout(startWhenReady, 100);
