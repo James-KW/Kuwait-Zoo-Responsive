@@ -6,36 +6,36 @@ import {
 
 const REPORT_DOC_ID = '__report__';
 const deletedIds = new Set();
-let observer;
 let activeUser = null;
+let initialized = false;
 
 function $(id) { return document.getElementById(id); }
-
+function setStatus(message, isError = false) {
+  const status = $('status');
+  if (!status) return;
+  status.textContent = message;
+  status.style.color = isError ? '#b42318' : '#20743b';
+}
 function safeCount(value) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0 ? number : 0;
 }
-
 function reportTotals() {
   const rows = [...document.querySelectorAll('#speciesRows tr')];
   let male = 0, female = 0, unknown = 0, total = 0, chimpanzees = 0, monkeySpecies = 0;
   for (const row of rows) {
-    const cells = row.querySelectorAll('[data-field]');
-    const values = Object.fromEntries([...cells].map(cell => [cell.dataset.field, safeCount(cell.textContent.trim())]));
+    const values = Object.fromEntries([...row.querySelectorAll('[data-field]')]
+      .map(cell => [cell.dataset.field, safeCount(cell.textContent.trim())]));
     const rowTotal = values.male + values.female + values.unknown;
     male += values.male; female += values.female; unknown += values.unknown; total += rowTotal;
     if ((row.dataset.id || '').startsWith('chimp')) chimpanzees += rowTotal;
     else monkeySpecies++;
   }
   const assign = (id, value) => { const element = $(id); if (element) element.textContent = value; };
-  assign('speciesCount', monkeySpecies);
-  assign('populationTotal', total);
-  assign('maleTotal', male);
-  assign('femaleTotal', female);
-  assign('unknownTotal', unknown);
-  assign('chimpTotal', chimpanzees);
+  assign('speciesCount', monkeySpecies); assign('populationTotal', total);
+  assign('maleTotal', male); assign('femaleTotal', female);
+  assign('unknownTotal', unknown); assign('chimpTotal', chimpanzees);
 }
-
 function filterDeletedRows() {
   const tbody = $('speciesRows');
   if (!tbody) return;
@@ -44,7 +44,6 @@ function filterDeletedRows() {
   }
   reportTotals();
 }
-
 function buildAddSpeciesControl() {
   const controls = $('editControls');
   if (!controls || $('addSpeciesForm')) return;
@@ -63,27 +62,22 @@ function buildAddSpeciesControl() {
     <button class="control-btn" id="addSpeciesButton" type="button" style="margin-top:8px"><i class="fas fa-plus"></i> Add species</button>`;
   controls.append(section);
 }
-
 function slugify(name) {
   return name.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
 }
-
 async function addSpecies(db) {
   if (!activeUser || !document.body.classList.contains('editing')) {
-    alert('Sign in and enable Edit Mode first.');
-    return;
+    setStatus('Sign in as admin and enable Edit Mode before adding a species.', true); return;
   }
   const label = $('newSpeciesName').value.trim();
   if (!label) { $('newSpeciesName').focus(); return; }
   const id = slugify(label);
-  if (!id || id === REPORT_DOC_ID) { alert('Please enter a valid species name.'); return; }
-  const ref = doc(db, 'species', id);
-  const button = $('addSpeciesButton');
-  button.disabled = true;
+  if (!id || id === REPORT_DOC_ID) { setStatus('Enter a valid species name.', true); return; }
+  const button = $('addSpeciesButton'); button.disabled = true;
   try {
-    if ((await getDoc(ref)).exists()) {
-      alert('A species with this name/ID already exists.');
-      return;
+    const ref = doc(db, 'species', id);
+    if ((await getDoc(ref)).exists() && !deletedIds.has(id)) {
+      setStatus('A species with this name already exists.', true); return;
     }
     const male = safeCount($('newSpeciesMale').value);
     const female = safeCount($('newSpeciesFemale').value);
@@ -93,68 +87,65 @@ async function addSpecies(db) {
     await setDoc(doc(db, 'species', REPORT_DOC_ID), { deletedSpecies: [...deletedIds], updatedAt: serverTimestamp() }, { merge: true });
     $('newSpeciesName').value = '';
     $('newSpeciesMale').value = $('newSpeciesFemale').value = $('newSpeciesUnknown').value = '0';
-    const status = $('status');
-    status.textContent = `${label} added and saved to Firestore.`;
-    status.style.color = '#20743b';
+    setStatus(`${label} added and saved to Firestore.`);
   } catch (error) {
-    console.error(error);
-    const status = $('status');
-    status.textContent = 'Could not add species. Check Firestore write rules and try again.';
-    status.style.color = '#b42318';
-  } finally {
-    button.disabled = false;
-  }
+    console.error('Add species failed:', error);
+    setStatus(`Add failed (${error.code || error.message}). Check Firestore write rules.`, true);
+  } finally { button.disabled = false; }
 }
-
 async function deleteSpecies(db, id, label) {
   if (!activeUser || !document.body.classList.contains('editing')) return;
-  if (!confirm(`Delete ${label} permanently from Firestore?`)) return;
-  const status = $('status');
+  if (!confirm(`Delete ${label} from the report and Firestore?`)) return;
   try {
     const nextDeleted = new Set(deletedIds);
     nextDeleted.add(id);
-    // Persist the tombstone first so default species are not reintroduced on refresh.
+    // Save the deletion marker before deleting the row document. Defaults are hidden using this marker after reload.
     await setDoc(doc(db, 'species', REPORT_DOC_ID), { deletedSpecies: [...nextDeleted], updatedAt: serverTimestamp() }, { merge: true });
     await deleteDoc(doc(db, 'species', id));
     deletedIds.add(id);
     filterDeletedRows();
-    status.textContent = `${label} deleted and saved. It will stay deleted after reload.`;
-    status.style.color = '#20743b';
+    setStatus(`${label} deleted and saved. It will remain deleted after reload.`);
   } catch (error) {
-    console.error(error);
-    status.textContent = 'Delete failed. Check that Firestore rules allow the admin to update __report__ and delete species documents.';
-    status.style.color = '#b42318';
+    console.error('Delete species failed:', error);
+    setStatus(`Delete failed (${error.code || error.message}). Firestore must allow admin writes to __report__ and deletes from species.`, true);
   }
 }
-
 function initialize() {
-  if (!$('speciesRows') || !$('editControls')) return;
+  if (initialized) return;
+  const tbody = $('speciesRows'), controls = $('editControls');
+  if (!tbody || !controls) return;
   let app;
   try { app = getApp(); } catch { return; }
+  initialized = true;
   const auth = getAuth(app), db = getFirestore(app);
   buildAddSpeciesControl();
   onAuthStateChanged(auth, user => { activeUser = user; });
-
-  onSnapshot(collection(db, 'species'), snapshot => {
-    const metadata = snapshot.docs.find(item => item.id === REPORT_DOC_ID)?.data();
+  onSnapshot(doc(db, 'species', REPORT_DOC_ID), snapshot => {
     deletedIds.clear();
-    for (const id of metadata?.deletedSpecies || []) deletedIds.add(id);
+    for (const id of snapshot.data()?.deletedSpecies || []) deletedIds.add(id);
     filterDeletedRows();
-  }, error => console.error('Could not load persisted deleted species:', error));
-
-  const tbody = $('speciesRows');
-  observer = new MutationObserver(filterDeletedRows);
+  }, error => {
+    console.error('Could not read persistent deletion markers:', error);
+    setStatus(`Could not load delete state (${error.code || error.message}); check Firestore read rules.`, true);
+  });
+  const observer = new MutationObserver(filterDeletedRows);
   observer.observe(tbody, { childList: true });
+  // Capture before the page's row handlers so the delete action uses the persisted tombstone flow.
   tbody.addEventListener('click', event => {
     const button = event.target.closest('.delete-species');
     if (!button) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
+    event.preventDefault(); event.stopImmediatePropagation();
     const row = button.closest('tr');
     if (row) deleteSpecies(db, row.dataset.id, row.querySelector('td')?.textContent.trim() || row.dataset.id);
   }, true);
   $('addSpeciesButton').addEventListener('click', () => addSpecies(db));
 }
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialize, { once: true });
-else initialize();
+// firebase-config.js imports this module before the page initializes its Firebase app.
+// Retry briefly instead of silently abandoning all add/delete handlers on getApp() failure.
+function startWhenReady() {
+  initialize();
+  if (!initialized) setTimeout(startWhenReady, 100);
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startWhenReady, { once: true });
+else startWhenReady();
