@@ -26,11 +26,13 @@ function reportTotals() {
   const rows = [...document.querySelectorAll('#speciesRows tr')];
   let male = 0, female = 0, unknown = 0, total = 0, chimpanzees = 0, monkeySpecies = 0;
   for (const row of rows) {
+    const id = row.dataset.id || '';
+    if (deletedIds.has(id) || (firestoreIsSourceOfTruth && !liveSpeciesIds.has(id))) continue;
     const values = Object.fromEntries([...row.querySelectorAll('[data-field]')]
       .map(cell => [cell.dataset.field, safeCount(cell.textContent.trim())]));
     const rowTotal = values.male + values.female + values.unknown;
     male += values.male; female += values.female; unknown += values.unknown; total += rowTotal;
-    if ((row.dataset.id || '').startsWith('chimp')) chimpanzees += rowTotal;
+    if (id.startsWith('chimp')) chimpanzees += rowTotal;
     else monkeySpecies++;
   }
   const assign = (id, value) => { const element = $(id); if (element) element.textContent = value; };
@@ -159,7 +161,6 @@ async function saveAll(db) {
     }, { merge: true });
     firestoreIsSourceOfTruth = true;
     setStatus('Saved successfully. Reloading the live Firestore report…');
-    // Reload releases the page's stale in-memory data array; next render comes from Firestore.
     setTimeout(() => location.reload(), 700);
   } catch (error) {
     console.error('Save report failed:', error);
@@ -179,12 +180,15 @@ function initialize() {
   onAuthStateChanged(auth, user => { activeUser = user; });
   onSnapshot(collection(db, 'species'), snapshot => {
     const reportDoc = snapshot.docs.find(item => item.id === REPORT_DOC_ID);
-    const metadata = reportDoc?.data();
+    const metadata = reportDoc?.data() || {};
+    const persistedDeleted = Array.isArray(metadata.deletedSpecies) ? metadata.deletedSpecies : [];
     deletedIds.clear();
-    for (const id of metadata?.deletedSpecies || []) deletedIds.add(id);
+    for (const id of persistedDeleted) deletedIds.add(id);
     liveSpeciesIds.clear();
-    for (const item of snapshot.docs) if (item.id !== REPORT_DOC_ID) liveSpeciesIds.add(item.id);
-    firestoreIsSourceOfTruth = Boolean(reportDoc || liveSpeciesIds.size || metadata?.initialized);
+    for (const item of snapshot.docs) {
+      if (item.id !== REPORT_DOC_ID && !deletedIds.has(item.id)) liveSpeciesIds.add(item.id);
+    }
+    firestoreIsSourceOfTruth = true;
     reconcileRows();
   }, error => {
     console.error('Could not watch Firestore species:', error);
