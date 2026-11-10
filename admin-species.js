@@ -12,8 +12,22 @@ let activeUser = null;
 let initialized = false;
 
 function $(id) { return document.getElementById(id); }
+function ensureStatus() {
+  let status = $('status');
+  if (status) return status;
+  const controls = $('editControls');
+  if (!controls) return null;
+  status = document.createElement('div');
+  status.id = 'status';
+  status.className = 'status';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  status.style.cssText = 'font-size:12px;line-height:1.4;margin:8px 0;min-height:18px;overflow-wrap:anywhere';
+  controls.append(status);
+  return status;
+}
 function setStatus(message, isError = false) {
-  const status = $('status');
+  const status = ensureStatus();
   if (!status) return;
   status.textContent = message;
   status.style.color = isError ? '#b42318' : '#20743b';
@@ -40,6 +54,36 @@ function reportTotals() {
   assign('maleTotal', male); assign('femaleTotal', female);
   assign('unknownTotal', unknown); assign('chimpTotal', chimpanzees);
 }
+function appendSpeciesRow({ id, label, emoji = '🐒', male = 0, female = 0, unknown = 0 }) {
+  const tbody = $('speciesRows');
+  if (!tbody || tbody.querySelector(`tr[data-id="${CSS.escape(id)}"]`)) return;
+  const row = document.createElement('tr');
+  row.dataset.id = id;
+  const nameCell = document.createElement('td');
+  const name = document.createElement('div');
+  name.className = 'species-name';
+  const icon = document.createElement('span');
+  icon.className = 'emoji';
+  icon.textContent = emoji;
+  const title = document.createElement('strong');
+  title.textContent = label;
+  name.append(icon, title);
+  nameCell.append(name);
+  row.append(nameCell);
+  for (const [field, value] of Object.entries({ male, female, unknown })) {
+    const cell = document.createElement('td');
+    cell.dataset.field = field;
+    cell.textContent = safeCount(value);
+    cell.contentEditable = 'true';
+    cell.spellcheck = false;
+    row.append(cell);
+  }
+  const sum = document.createElement('td');
+  sum.textContent = safeCount(male) + safeCount(female) + safeCount(unknown);
+  row.append(sum);
+  tbody.append(row);
+  reportTotals();
+}
 function reconcileRows() {
   const tbody = $('speciesRows');
   if (!tbody) return;
@@ -48,31 +92,6 @@ function reconcileRows() {
     if (deletedIds.has(id) || (firestoreIsSourceOfTruth && !liveSpeciesIds.has(id))) row.remove();
   }
   reportTotals();
-}
-function applyResponsiveControlPanel() {
-  if ($('responsiveControlPanelStyles')) return;
-  const style = document.createElement('style');
-  style.id = 'responsiveControlPanelStyles';
-  style.textContent = `
-    @media (max-width: 700px) {
-      .side-panel {
-        display: flex;
-        position: static;
-        width: 100%;
-        height: auto;
-        max-height: none;
-        overflow: visible;
-        box-shadow: none;
-        border-bottom: 1px solid #ddd;
-        padding: 12px;
-      }
-      .side-panel:not(.open) { display: none; }
-      .side-panel.open { display: flex; }
-      .main-content-area { margin-left: 0; }
-      .edit-status { left: 8px; right: 8px; }
-    }
-  `;
-  document.head.append(style);
 }
 function buildAddSpeciesControl() {
   const controls = $('editControls');
@@ -93,37 +112,42 @@ function buildAddSpeciesControl() {
   controls.append(section);
 }
 function slugify(name) {
-  return name.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+  return name.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 60);
 }
 async function addSpecies(db) {
   if (!activeUser || !document.body.classList.contains('editing')) {
     setStatus('Sign in as admin and enable Edit Mode before adding a species.', true); return;
   }
-  const label = $('newSpeciesName').value.trim();
-  if (!label) { $('newSpeciesName').focus(); return; }
+  const label = $('newSpeciesName')?.value.trim();
+  if (!label) { $('newSpeciesName')?.focus(); setStatus('Enter a species name.', true); return; }
   const id = slugify(label);
   if (!id || id === REPORT_DOC_ID) { setStatus('Enter a valid species name.', true); return; }
-  const button = $('addSpeciesButton'); button.disabled = true;
+  const button = $('addSpeciesButton');
+  if (!button) { setStatus('Add Species form is unavailable. Reload the page and try again.', true); return; }
+  button.disabled = true;
   try {
     const ref = doc(db, 'species', id);
     if ((await getDoc(ref)).exists() && !deletedIds.has(id)) {
-      setStatus('A species with this name already exists.', true); return;
+      setStatus(`“${label}” already exists. Use a different species name.`, true); return;
     }
-    const male = safeCount($('newSpeciesMale').value);
-    const female = safeCount($('newSpeciesFemale').value);
-    const unknown = safeCount($('newSpeciesUnknown').value);
+    const male = safeCount($('newSpeciesMale')?.value);
+    const female = safeCount($('newSpeciesFemale')?.value);
+    const unknown = safeCount($('newSpeciesUnknown')?.value);
     const remainingDeleted = [...deletedIds].filter(deletedId => deletedId !== id);
     await setDoc(doc(db, 'species', REPORT_DOC_ID), {
       deletedSpecies: remainingDeleted, initialized: true, updatedAt: serverTimestamp()
     }, { merge: true });
     await setDoc(ref, { label, emoji: '🐒', male, female, unknown, total: male + female + unknown, updatedAt: serverTimestamp() });
-    deletedIds.delete(id); liveSpeciesIds.add(id); firestoreIsSourceOfTruth = true;
+    deletedIds.delete(id);
+    liveSpeciesIds.add(id);
+    firestoreIsSourceOfTruth = true;
+    appendSpeciesRow({ id, label, emoji: '🐒', male, female, unknown });
     $('newSpeciesName').value = '';
     $('newSpeciesMale').value = $('newSpeciesFemale').value = $('newSpeciesUnknown').value = '0';
     setStatus(`${label} added and saved to Firestore.`);
   } catch (error) {
     console.error('Add species failed:', error);
-    setStatus(`Add failed (${error.code || error.message}). Check Firestore write rules.`, true);
+    setStatus(`Add failed (${error.code || error.message}). ${error.message || 'Check Firestore permissions and connection.'}`, true);
   } finally { button.disabled = false; }
 }
 async function deleteSpecies(db, id, label) {
@@ -171,11 +195,10 @@ async function saveAll(db) {
   setStatus('Saving all visible species and report text to Firestore…');
   try {
     const items = collectEditedRows();
-    const batchTime = serverTimestamp();
     for (const item of items) {
       await setDoc(doc(db, 'species', item.id), {
         label: item.label, emoji: item.emoji, male: item.male, female: item.female,
-        unknown: item.unknown, total: item.total, updatedAt: batchTime
+        unknown: item.unknown, total: item.total, updatedAt: serverTimestamp()
       }, { merge: true });
     }
     const note = $('populationNote')?.textContent.trim() || '';
@@ -185,11 +208,11 @@ async function saveAll(db) {
       deletedSpecies: [...deletedIds], initialized: true, updatedAt: serverTimestamp()
     }, { merge: true });
     firestoreIsSourceOfTruth = true;
-    setStatus('Saved successfully. Reloading the live Firestore report…');
-    setTimeout(() => location.reload(), 700);
+    setStatus('Saved successfully. Firestore has been updated.');
   } catch (error) {
     console.error('Save report failed:', error);
-    setStatus(`Save failed (${error.code || error.message}). Check Firestore rules and the highlighted field values.`, true);
+    setStatus(`Save failed (${error.code || error.message}). ${error.message || 'Check Firestore permissions and field values.'}`, true);
+  } finally {
     buttons.forEach(button => button.disabled = false);
   }
 }
@@ -200,8 +223,8 @@ function initialize() {
   let app;
   try { app = getApp(); } catch { return; }
   initialized = true;
+  ensureStatus();
   const auth = getAuth(app), db = getFirestore(app);
-  applyResponsiveControlPanel();
   buildAddSpeciesControl();
   onAuthStateChanged(auth, user => { activeUser = user; });
   onSnapshot(collection(db, 'species'), snapshot => {
@@ -235,7 +258,7 @@ function initialize() {
       saveAll(db);
     }, true);
   }
-  $('addSpeciesButton').addEventListener('click', () => addSpecies(db));
+  $('addSpeciesButton')?.addEventListener('click', () => addSpecies(db));
 }
 function startWhenReady() {
   initialize();
