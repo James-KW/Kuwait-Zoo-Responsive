@@ -10,5 +10,7 @@ const firebaseConfig = {
 
 // Admin species add/delete support. This module safely no-ops on pages without the report table.
 import './admin-species.js';
+// Correct mobile spacing so the fixed header does not cover the control-panel toggle.
+import './mobile-layout-fix.js';
 
 export { firebaseConfig };
