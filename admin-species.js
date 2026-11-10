@@ -49,6 +49,31 @@ function reconcileRows() {
   }
   reportTotals();
 }
+function applyResponsiveControlPanel() {
+  if ($('responsiveControlPanelStyles')) return;
+  const style = document.createElement('style');
+  style.id = 'responsiveControlPanelStyles';
+  style.textContent = `
+    @media (max-width: 700px) {
+      .side-panel {
+        display: flex;
+        position: static;
+        width: 100%;
+        height: auto;
+        max-height: none;
+        overflow: visible;
+        box-shadow: none;
+        border-bottom: 1px solid #ddd;
+        padding: 12px;
+      }
+      .side-panel:not(.open) { display: none; }
+      .side-panel.open { display: flex; }
+      .main-content-area { margin-left: 0; }
+      .edit-status { left: 8px; right: 8px; }
+    }
+  `;
+  document.head.append(style);
+}
 function buildAddSpeciesControl() {
   const controls = $('editControls');
   if (!controls || $('addSpeciesForm')) return;
@@ -176,6 +201,7 @@ function initialize() {
   try { app = getApp(); } catch { return; }
   initialized = true;
   const auth = getAuth(app), db = getFirestore(app);
+  applyResponsiveControlPanel();
   buildAddSpeciesControl();
   onAuthStateChanged(auth, user => { activeUser = user; });
   onSnapshot(collection(db, 'species'), snapshot => {
